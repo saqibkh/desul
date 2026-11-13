@@ -1,0 +1,107 @@
+name: HIP on simulated MI300X
+
+# The other CI jobs build Kokkos with OpenMP only, so the HIP atomics in desul
+# are never compiled or run here. This job builds Kokkos with the HIP backend
+# and the desul unit tests, and runs them on a simulated AMD Instinct MI300X
+# (https://github.com/pantheongpu/pantheonsim). A simulator cannot reproduce
+# hardware-specific behavior or timing, so it complements real-GPU testing and
+# does not replace it.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ master ]
+    paths:
+      - "atomics/**"
+      - "cmake/**"
+      - "external/**"
+      - "CMakeLists.txt"
+      - ".github/workflows/gpu-sim.yml"
+  pull_request:
+    paths:
+      - "atomics/**"
+      - "cmake/**"
+      - "external/**"
+      - "CMakeLists.txt"
+      - ".github/workflows/gpu-sim.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  KOKKOS_VERSION: 5.3.0
+
+jobs:
+  build-and-test:
+    name: HIP (ROCm 7.1) on simulated MI300X
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        path: source
+        submodules: true
+        persist-credentials: false
+
+    - name: Set up the simulated GPU and ROCm
+      uses: pantheongpu/setup-pantheonsim@68edfd58c091361dd6baf060b63de412e544d858 # v0.1.7
+      with:
+        gpu: amd/mi300x
+        cuda-toolkit: none
+        rocm: "7.1"
+
+    # The action installs only the compiler side of ROCm; find_package(hip)
+    # also needs the comgr and HSA runtime CMake packages.
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends comgr hsa-rocr ninja-build
+
+    - name: Build Kokkos
+      run: |
+        git clone --depth 1 --branch ${KOKKOS_VERSION} https://github.com/kokkos/kokkos.git
+        cmake -S kokkos -B kokkos-build -GNinja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_CXX_STANDARD=20 \
+              -DCMAKE_CXX_COMPILER=hipcc \
+              -DCMAKE_PREFIX_PATH=/opt/rocm \
+              -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/kokkos-install \
+              -DKokkos_ENABLE_HIP=ON \
+              -DKokkos_ENABLE_SERIAL=ON \
+              -DKokkos_ENABLE_ROCTHRUST=OFF \
+              -DKokkos_ARCH_AMD_GFX942=ON
+        cmake --build kokkos-build -j3
+        cmake --install kokkos-build
+
+    # --offload-arch is set for desul's own HIP source (Lock_Array_HIP.cpp),
+    # which does not get the Kokkos architecture flags.
+    - name: Configure desul
+      run: |
+        cmake -S source -B build -GNinja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DBLT_CXX_STD=c++20 \
+              -DCMAKE_CXX_COMPILER=hipcc \
+              -DCMAKE_CXX_FLAGS="--offload-arch=gfx942" \
+              -DCMAKE_HIP_ARCHITECTURES=gfx942 \
+              -DCMAKE_PREFIX_PATH="${{ github.workspace }}/kokkos-install;/opt/rocm" \
+              -DROCM_PATH=/opt/rocm \
+              -DENABLE_HIP=ON \
+              -DENABLE_TESTS=ON
+
+    - name: Build
+      run: cmake --build build -j3
+
+    # float_perf_test is skipped: its random-location check sums about 5000
+    # floats per location in whatever order the GPU runs the atomics and
+    # compares with a sequential host sum at a relative tolerance of 1e-6.
+    # About 1 in 6 locations differ by more than that on the simulator, and a
+    # plain reordering of the same sum on the host gives the same result.
+    - name: Test
+      run: vgpu run ctest --test-dir build --output-on-failure --no-tests=error
+           -E '^float_perf_test$'

@@ -10,7 +10,7 @@ name: HIP on simulated MI300X
 on:
   workflow_dispatch:
   push:
-    branches: [ master ]
+    branches: [ master, verify-gpu-sim ]
     paths:
       - "atomics/**"
       - "cmake/**"
@@ -50,11 +50,13 @@ jobs:
         persist-credentials: false
 
     - name: Set up the simulated GPU and ROCm
-      uses: pantheongpu/setup-pantheonsim@68edfd58c091361dd6baf060b63de412e544d858 # v0.1.7
+      uses: pantheongpu/pantheonsim@6e1ad92d1a1aa0b73776cb9719145f5a7d5bb33a # pantheonsim PR 633 head
       with:
         gpu: amd/mi300x
+        count: '1'
         cuda-toolkit: none
         rocm: "7.1"
+        library-path: 'true'
 
     # The action installs only the compiler side of ROCm; find_package(hip)
     # also needs the comgr and HSA runtime CMake packages.
